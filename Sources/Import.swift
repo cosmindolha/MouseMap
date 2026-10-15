@@ -96,8 +96,15 @@ enum LogiImport {
     static func shortcut(_ card: [String: Any]) -> Shortcut? {
         guard let macro = card["macro"] as? [String: Any] else { return nil }
         if let key = macro["keystroke"] as? [String: Any], let usage = key["code"] as? Int, let code = keyCodes[usage] {
-            let mods = (key["modifiers"] as? [Int] ?? []).reduce(UInt64(0)) { value, usage in
-                value | ([224: UInt64(1 << 18), 228: 1 << 18, 225: 1 << 17, 229: 1 << 17, 226: 1 << 19, 230: 1 << 19, 227: 1 << 20, 231: 1 << 20][usage] ?? 0)
+            var mods: UInt64 = 0
+            for modifier in key["modifiers"] as? [Int] ?? [] {
+                switch modifier {
+                case 224, 228: mods |= 1 << 18
+                case 225, 229: mods |= 1 << 17
+                case 226, 230: mods |= 1 << 19
+                case 227, 231: mods |= 1 << 20
+                default: break
+                }
             }
             let name = key["displayCharacter"] as? String ?? String((key["virtualKeyId"] as? String ?? "Key").replacingOccurrences(of: "VK_", with: ""))
             let prefix = [(18, "⌃"), (19, "⌥"), (17, "⇧"), (20, "⌘")].filter { mods & (1 << $0.0) != 0 }.map { $0.1 }.joined()

@@ -96,6 +96,9 @@ final class Logitech {
     }
 
     func configure(_ configuration: Configuration, app: String, suspended: Bool) {
+        // Workspace activation notifications can arrive while Quit is restoring
+        // the device. They must not re-divert controls and keep shutdown alive.
+        guard stopping == nil else { return }
         var targets: [Int: UInt8] = [:]
         if configuration.enabled && !suspended {
             for control in controls where control.divertible {

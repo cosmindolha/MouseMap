@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
     private var takingOver = false
     private var tookOver = false
     private var sleeping = false
+    private var quitting = false
     private var setupPermissions = false
     private var askedAccessibility = false
     private var askedMonitoring = false
@@ -81,7 +82,7 @@ final class AppState: ObservableObject {
         let ax = AXIsProcessTrusted(); let input = CGPreflightListenEventAccess()
         let changed = ax != accessibility || input != monitoring
         accessibility = ax; monitoring = input
-        guard !sleeping else { return }
+        guard !sleeping && !quitting else { return }
         if !ax {
             engine.stop(); router.suspended = true
             if changed { logitech.stop {} }
@@ -119,7 +120,7 @@ final class AppState: ObservableObject {
     }
     func syncHID() {
         router.configuration = configuration
-        logitech.configure(configuration, app: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "", suspended: recording != nil || sleeping || !accessibility)
+        logitech.configure(configuration, app: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "", suspended: recording != nil || sleeping || quitting || !accessibility)
     }
     func save() {
         guard !startupError else { return }
@@ -155,6 +156,8 @@ final class AppState: ObservableObject {
         ready = health.ready
         status = health.message
         let report: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "bundlePath": Bundle.main.bundlePath,
+            "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+            "tabWheelPolicy": "one-per-burst-300ms",
             "activationPolicy": NSApp.activationPolicy() == .accessory ? "accessory" : "regular",
             "settingsVisible": NSApp.windows.contains { $0.isVisible && $0.title == "MouseMap" },
             "accessibility": accessibility, "inputMonitoring": monitoring, "keyboardPosting": posting,
@@ -186,6 +189,11 @@ final class AppState: ObservableObject {
     func cancelRecording() {
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
         recording = nil; router.suspended = false; syncHID()
+    }
+    func shutdown(completion: @escaping () -> Void) {
+        quitting = true; timer?.invalidate(); timer = nil
+        cancelRecording(); router.suspended = true
+        logitech.stop(completion: completion)
     }
     func set(_ input: String, shortcut: Shortcut?) {
         guard let index = configuration.profiles.firstIndex(where: { $0.id == selected }) else { return }
@@ -347,8 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) { state.cancelRecording() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        state.cancelRecording()
-        state.logitech.stop { NSApp.reply(toApplicationShouldTerminate: true) }
+        state.shutdown { DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) } }
         return .terminateLater
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { show(); return true }
