@@ -12,6 +12,7 @@ MouseMap uses macOS event taps and Logitech HID++ through `IOHIDManager`. It nee
 - Set global mappings with application-specific overrides, matched by bundle identifier.
 - Record keyboard shortcuts directly in settings.
 - Map thumb-button click and directional gestures, plus thumb-wheel left/right movements.
+- Navigate browser tabs once per thumb-wheel burst, with a 300 ms quiet period between turns and immediate direction reversal.
 - Import compatible Options+ profiles, keyboard shortcuts, and the selected gesture preset.
 - Keep native behavior for unassigned buttons or explicitly override an inherited mapping.
 - Run in the menu bar with no Dock icon. Closing settings leaves remapping running; only **Quit MouseMap** exits.
@@ -108,6 +109,7 @@ build/MouseMap.app/Contents/MacOS/MouseMap --probe-hid
 | `--import-options` | Snapshot and import the original local Options+ database |
 | `--enable-login` | Register the installed bundle for login startup |
 | `--request-permissions` | Launch the GUI with guided permission setup |
+| `--background` | Launch with settings closed when permissions are already granted |
 
 CLI permission results can inherit the terminal's authorization. Use the running application's **Ready** status or `runtime-health.json` to check the GUI itself. Avoid a HID probe while the GUI is actively remapping: the probe restores reporting modes before exiting.
 
@@ -116,6 +118,7 @@ Validated: native build, regression checks, continued input capture with setting
 ## Current limitations
 
 - Horizontal wheel shortcuts also affect horizontal scrolling from other mice or trackpads in the same application.
+- Ctrl-Tab and Ctrl-Shift-Tab wheel mappings fire once per event burst and ignore momentum. Other wheel shortcuts retain a 100 ms interval.
 - Gestures use a 50-count dead zone and fire once on release. Options+' continuous gesture timing is not replicated.
 - Manually added standard OS button mappings also apply to other mice; imported MX Master mappings use device-specific HID++ controls.
 - Hardware-specific errors appear in settings. Wake the mouse and use **Reconnect mouse** when needed.

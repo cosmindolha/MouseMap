@@ -87,11 +87,26 @@ final class Router {
     func reset() { swallowed.removeAll() }
 }
 
+// A physical thumb-wheel turn produces a stream of high-resolution events.
+// Browser tab navigation should treat that stream as one deliberate action.
+struct TabWheelGate {
+    private var lastTime = -Double.infinity
+    private var lastDirection = 0
+    private var lastApplication = ""
+    mutating func allow(direction: Int, time: TimeInterval, application: String, momentum: Bool = false) -> Bool {
+        guard !momentum else { return false }
+        let newBurst = time - lastTime >= 0.3 || direction != lastDirection || application != lastApplication
+        lastTime = time; lastDirection = direction; lastApplication = application
+        return newBurst
+    }
+}
+
 final class EventEngine {
     let router: Router
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private var wheelTime = Date.distantPast
+    private var tabWheel = TabWheelGate()
     var error: (String) -> Void = { _ in }
     private let marker: Int64 = 0x4D4F5553454D4150
     var isRunning: Bool { tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
@@ -133,7 +148,14 @@ final class EventEngine {
             let input = x > 0 ? "wheel:left" : "wheel:right"
             guard let shortcut = router.configuration.shortcut(input, app: router.activeApp) else { return Unmanaged.passUnretained(event) }
             router.observed(input)
-            if Date().timeIntervalSince(wheelTime) >= 0.1 { router.emit(shortcut); wheelTime = Date() }
+            if shortcut.keyCode == 48 && shortcut.modifiers & CGEventFlags.maskControl.rawValue != 0 {
+                if tabWheel.allow(direction: x > 0 ? -1 : 1, time: ProcessInfo.processInfo.systemUptime,
+                    application: router.activeApp, momentum: event.getIntegerValueField(.scrollWheelEventMomentumPhase) != 0) {
+                    router.emit(shortcut)
+                }
+            } else if Date().timeIntervalSince(wheelTime) >= 0.1 {
+                router.emit(shortcut); wheelTime = Date()
+            }
             return nil
         }
         let number = event.getIntegerValueField(.mouseEventButtonNumber)

@@ -340,7 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "MouseMap"; window.delegate = self; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: SettingsView(state: state)); window.center()
         state.start(requestPermissions: CommandLine.arguments.contains("--request-permissions"))
-        if !login || !state.accessibility || !state.monitoring { show() }
+        if (!login && !CommandLine.arguments.contains("--background")) || !state.accessibility || !state.monitoring { show() }
     }
     @objc func show() { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
     @objc func toggle() { state.toggleEnabled() }

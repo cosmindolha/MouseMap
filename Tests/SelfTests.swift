@@ -75,5 +75,15 @@ func runSelfTests() {
     check(!health.ready && health.message == "Profiles need attention", "invalid profiles prevent startup")
     health.profilesValid = true; health.enabled = false
     check(!health.ready && health.message == "Paused", "paused startup remains explicit")
+    var wheel = TabWheelGate()
+    check(wheel.allow(direction: 1, time: 0, application: "browser"), "first wheel event changes tab immediately")
+    check(!wheel.allow(direction: 1, time: 0.04, application: "browser"), "high-resolution duplicate suppressed")
+    check(!wheel.allow(direction: 1, time: 0.15, application: "browser"), "small turn cannot repeat after old 100ms cooldown")
+    check(!wheel.allow(direction: 1, time: 0.32, application: "browser"), "quiet period measures from the last event")
+    check(!wheel.allow(direction: 1, time: 0.6, application: "browser", momentum: true), "inertial scroll cannot move another tab")
+    check(wheel.allow(direction: 1, time: 0.65, application: "browser"), "new turn works after 300ms quiet")
+    check(wheel.allow(direction: -1, time: 0.67, application: "browser"), "direction reversal responds immediately")
+    check(!wheel.allow(direction: -1, time: 0.7, application: "browser"), "reverse burst duplicates suppressed")
+    check(wheel.allow(direction: -1, time: 0.72, application: "other-browser"), "new foreground app gets its own first action")
     printJSON(["passed": checks, "failed": 0])
 }
