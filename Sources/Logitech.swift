@@ -8,11 +8,23 @@ struct LogitechControl: Identifiable {
     var rawXY: Bool { flags & 0x100 != 0 }
 }
 
+struct HIDRecoveryBudget {
+    private(set) var attempt = 0
+    mutating func nextDelay() -> TimeInterval? {
+        let delays: [TimeInterval] = [0.5, 1, 2, 4, 8]
+        guard attempt < delays.count else { return nil }
+        defer { attempt += 1 }
+        return delays[attempt]
+    }
+    mutating func reset() { attempt = 0 }
+}
+
 // HID++ 2.0 over IOHID: no device seizure and no persistent firmware changes.
 final class Logitech {
     var changed: () -> Void = {}
     var button: (String, Bool) -> Void = { _, _ in }
     var gesture: (String) -> Void = { _ in }
+    var resetInputState: () -> Void = {}
     private(set) var status = "Extra buttons not connected"
     private(set) var controls: [LogitechControl] = []
     private var manager: IOHIDManager?
@@ -29,10 +41,25 @@ final class Logitech {
     private var querying = false
     private var faulted = false
     private var generation = UUID()
+    private var recovery = HIDRecoveryBudget()
+    private var recoveryTask: DispatchWorkItem?
+    private var recoveryEnabled = true
+    private var activityRecoveryTime = -Double.infinity
+    private let outputQueue = DispatchQueue(label: "MouseMap.HIDOutput")
+    private let writeReport: (IOHIDDevice, [UInt8]) -> IOReturn
+    private(set) var reconnectCount = 0
+    var recoveryAttempt: Int { recovery.attempt }
     var isReady: Bool { device != nil && feature != 0 && !querying && !faulted && pending == nil && diverted == desired }
+
+    init(writeReport: ((IOHIDDevice, [UInt8]) -> IOReturn)? = nil) {
+        self.writeReport = writeReport ?? { device, report in
+            report.withUnsafeBufferPointer { IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 0x11, $0.baseAddress!, $0.count) }
+        }
+    }
 
     func start() {
         guard manager == nil else { return }
+        recoveryEnabled = true
         guard CGPreflightListenEventAccess() else { status = "Input Monitoring permission needed for extra buttons"; changed(); return }
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, 0)
         self.manager = manager
@@ -62,8 +89,9 @@ final class Logitech {
             if report.first != UInt8(reportID) { report.insert(UInt8(reportID), at: 0) }
             owner.receive(report)
         }, Unmanaged.passUnretained(self).toOpaque())
-        status = "Reading Logitech controls…"; changed()
         querying = true
+        resetInputState()
+        status = "Reading Logitech controls…"; changed()
         request(0, 0, [0x1b, 0x04]) { reply in
             guard let reply, reply.count >= 5, reply[4] != 0 else { self.failed("HID++ discovery failed; wake the mouse and reconnect"); return }
             self.feature = reply[4]
@@ -117,6 +145,7 @@ final class Logitech {
         guard device != nil, feature != 0, !querying, pending == nil, !faulted else { return }
         guard let cid = Set(diverted.keys).union(desired.keys).sorted().first(where: { diverted[$0] != desired[$0] && !pressed.contains($0) }) else {
             if let done = stopping, diverted.isEmpty { stopping = nil; close(); done() }
+            else if isReady { recovery.reset() }
             return
         }
         if original[cid] == nil {
@@ -133,8 +162,12 @@ final class Logitech {
         let valid: UInt8 = controls.first(where: { $0.id == cid })?.rawXY == true ? 0x22 : 0x02
         request(feature, 0x30, [UInt8(cid >> 8), UInt8(cid & 255), flags | valid, 0, 0]) { reply in
             guard let reply, reply.count > 6, Int(reply[4]) << 8 | Int(reply[5]) == cid else { self.failed("Cannot configure button \(cid)"); return }
-            if let target { self.diverted[cid] = target } else { self.diverted.removeValue(forKey: cid) }
-            self.reconcile()
+            self.request(self.feature, 0x20, [UInt8(cid >> 8), UInt8(cid & 255)]) { readback in
+                guard let readback, readback.count > 6, Int(readback[4]) << 8 | Int(readback[5]) == cid,
+                      readback[6] & 0x11 == flags & 0x11 else { self.failed("Button \(cid) reporting verification failed"); return }
+                if let target { self.diverted[cid] = target } else { self.diverted.removeValue(forKey: cid) }
+                self.reconcile()
+            }
         }
     }
 
@@ -145,8 +178,8 @@ final class Logitech {
         var report: [UInt8] = [0x11, 0xff, feature, function | 0x0d] + parameters
         report += Array(repeating: 0, count: max(0, 20 - report.count))
         // IOHID SetReport can block; keep it off the event-tap run loop.
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = report.withUnsafeBufferPointer { IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 0x11, $0.baseAddress!, $0.count) }
+        outputQueue.async {
+            let result = self.writeReport(device, report)
             DispatchQueue.main.async {
                 guard self.generation == generation, self.pending?.token == token else { return }
                 if result != kIOReturnSuccess { self.complete(nil) }
@@ -160,6 +193,13 @@ final class Logitech {
     private func complete(_ reply: [UInt8]?) { let callback = pending?.callback; pending = nil; callback?(reply) }
 
     private func receive(_ r: [UInt8]) {
+        if r.first == 2, faulted, recoveryEnabled, recoveryTask == nil,
+           ProcessInfo.processInfo.systemUptime - activityRecoveryTime >= 10 {
+            // Fresh physical mouse activity is a new opportunity after the
+            // bounded startup/wake retries have been exhausted.
+            activityRecoveryTime = ProcessInfo.processInfo.systemUptime
+            recovery.reset(); scheduleRecovery()
+        }
         guard r.count >= 4, r[0] == 0x11 else { return }
         if let pending, r[2] == pending.feature, r[3] == pending.function | 0x0d { complete(r); return }
         if let pending, r[2] == 0xff, r.count >= 7, r[3] == pending.feature, r[4] == pending.function | 0x0d { complete(nil); return }
@@ -192,26 +232,61 @@ final class Logitech {
     }
     private func failed(_ message: String) {
         querying = false; faulted = true; status = message; changed()
-        if let done = stopping { stopping = nil; close(); done() }
+        if let done = stopping { close(); done() }
+        else { scheduleRecovery() }
+    }
+    private func scheduleRecovery() {
+        guard recoveryEnabled, stopping == nil, recoveryTask == nil,
+              let delay = recovery.nextDelay() else { return }
+        status += " · reconnecting (\(recovery.attempt)/5)"
+        changed()
+        let recoveryGeneration = generation
+        let task = DispatchWorkItem { [weak self] in
+            guard let self, self.recoveryEnabled, self.generation == recoveryGeneration else { return }
+            self.recoveryTask = nil
+            self.close(); self.reconnectCount += 1; self.start()
+        }
+        recoveryTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
+    }
+
+    func resetForWake() {
+        recoveryEnabled = false; recoveryTask?.cancel(); recoveryTask = nil
+        recovery.reset(); close(); reconnectCount += 1
+        status = "Waiting for mouse to reconnect"; changed()
     }
     private func removed(_ removed: IOHIDDevice) {
         guard device == removed else { return }
         generation = UUID(); device = nil; pending = nil; feature = 0; controls = []; diverted = [:]; original = [:]; pressed = []; motion = [:]
+        recoveryTask?.cancel(); recoveryTask = nil; recovery.reset(); faulted = false; querying = false
+        resetInputState()
+        let done = stopping; stopping = nil
         status = "Mouse disconnected"; changed()
+        if let done { close(); done() }
     }
     func stop(completion: @escaping () -> Void) {
+        recoveryEnabled = false; recoveryTask?.cancel(); recoveryTask = nil
         desired = [:]
         guard device != nil, feature != 0, !diverted.isEmpty else { close(); completion(); return }
         // Release handling remains active while restoring temporary reporting modes.
         stopping = completion; faulted = false; reconcile()
+        let stopGeneration = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.generation == stopGeneration, let done = self.stopping else { return }
+            self.close(); done()
+        }
     }
     private func close() {
         generation = UUID(); pending = nil
-        if let device { IOHIDDeviceRegisterInputReportCallback(device, buffer, 64, nil, nil) }
-        if let manager {
+        let oldDevice = device; let oldManager = manager
+        device = nil; manager = nil
+        if let oldDevice { IOHIDDeviceRegisterInputReportCallback(oldDevice, buffer, 64, nil, nil) }
+        if let manager = oldManager {
             IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
             IOHIDManagerClose(manager, 0)
         }
         device = nil; manager = nil; feature = 0; controls = []; diverted = [:]; original = [:]; pressed = []; motion = [:]
+        desired = [:]; stopping = nil; querying = false; faulted = false
+        resetInputState()
     }
 }

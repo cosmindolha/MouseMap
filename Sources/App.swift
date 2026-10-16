@@ -20,7 +20,7 @@ final class AppState: ObservableObject {
     @Published var ready = false
     let router = Router()
     lazy var engine = EventEngine(router: router)
-    let logitech = Logitech()
+    let logitech: Logitech
     private var monitor: Any?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
@@ -33,8 +33,13 @@ final class AppState: ObservableObject {
     private var askedAccessibility = false
     private var askedMonitoring = false
     private var lastHealthData: Data?
+    private let writesHealthReport: Bool
+    private var sleepCount = 0
+    private var wakeCount = 0
+    private var lastWakeAt = ""
 
-    init() {
+    init(logitech: Logitech = Logitech(), writesHealthReport: Bool = true) {
+        self.logitech = logitech; self.writesHealthReport = writesHealthReport
         do { configuration = try Storage.load() } catch { self.error = "Could not load profiles: \(error.localizedDescription)"; startupError = true }
         router.configuration = configuration
         router.emit = { [weak self] shortcut in self?.engine.post(shortcut) }
@@ -54,13 +59,14 @@ final class AppState: ObservableObject {
             self.router.activeApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
             _ = self.router.button(input, down: true); _ = self.router.button(input, down: false)
         }
+        logitech.resetInputState = { [weak self] in self?.router.reset() }
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in self?.activeChanged() })
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }; self.sleeping = true; self.cancelRecording(); self.logitech.stop {}; self.engine.stop()
+            self?.prepareForSleep()
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.sleeping = false; self?.refreshPermissions(force: true)
+            self?.resumeAfterSleep()
         })
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPermissions() }
         activeChanged()
@@ -76,6 +82,23 @@ final class AppState: ObservableObject {
         setupPermissions = requestPermissions
         refreshPermissions(force: true)
         advancePermissionSetup()
+    }
+    func prepareForSleep() {
+        sleepCount += 1
+        sleeping = true; cancelRecording(); router.suspended = true; router.reset()
+        logitech.stop {}; engine.stop()
+    }
+    func resumeAfterSleep() {
+        guard !quitting else { return }
+        wakeCount += 1; lastWakeAt = ISO8601DateFormatter().string(from: Date())
+        // Invalidate the pre-sleep manager even if its asynchronous stop never
+        // completed while Bluetooth was suspended.
+        logitech.resetForWake(); router.reset(); sleeping = false
+        refreshPermissions(force: true)
+    }
+    func reconnectMouse() {
+        guard !sleeping && !quitting else { return }
+        logitech.resetForWake(); refreshPermissions(force: true)
     }
     func refreshPermissions(force: Bool = false) {
         defer { updateHealth(); advancePermissionSetup() }
@@ -158,12 +181,15 @@ final class AppState: ObservableObject {
         let report: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "bundlePath": Bundle.main.bundlePath,
             "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
             "tabWheelPolicy": "one-per-burst-300ms",
+            "hidReconnects": logitech.reconnectCount, "hidRecoveryAttempt": logitech.recoveryAttempt,
+            "sleeping": sleeping, "sleepCount": sleepCount, "wakeCount": wakeCount, "lastWakeAt": lastWakeAt,
             "activationPolicy": NSApp.activationPolicy() == .accessory ? "accessory" : "regular",
             "settingsVisible": NSApp.windows.contains { $0.isVisible && $0.title == "MouseMap" },
             "accessibility": accessibility, "inputMonitoring": monitoring, "keyboardPosting": posting,
             "eventTap": engine.isRunning, "mouseReady": logitech.isReady, "loginEnabled": login,
             "profilesValid": !startupError, "profileCount": configuration.profiles.count, "enabled": configuration.enabled,
             "ready": ready, "status": status, "mouseStatus": logitech.status]
+        guard writesHealthReport else { return }
         do {
             let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             if data != lastHealthData {
@@ -317,7 +343,7 @@ struct SettingsView: View {
                 HStack {
                     Button("View import report") { NSWorkspace.shared.open(Storage.directory.appendingPathComponent("import-report.json")) }
                     Spacer()
-                    Button("Reconnect mouse") { state.logitech.stop { state.logitech.start(); state.syncHID() } }.disabled(!state.accessibility || !state.monitoring)
+                    Button("Reconnect mouse") { state.reconnectMouse() }.disabled(!state.accessibility || !state.monitoring)
                     if FileManager.default.fileExists(atPath: "/Library/LaunchAgents/com.logi.optionsplus.plist") {
                         Button("Restore Options+") { state.restoreOptions() }
                     }

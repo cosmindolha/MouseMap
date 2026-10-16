@@ -57,6 +57,8 @@ The mouse icon in the macOS menu bar opens settings and provides Pause/Resume an
 
 Pause restores native reporting for diverted buttons; quitting restores temporary reporting before exiting. Login launches leave settings closed unless permission setup needs attention. It runs in the logged-in user's session; it does not remap the macOS login screen or run as root.
 
+On wake, MouseMap discards the old HID connection, clears pre-sleep button state, and rediscovers the mouse. Bluetooth handshakes retry with bounded delays of 0.5, 1, 2, 4, and 8 seconds, and configured reporting modes are read back from the mouse before it is considered ready. Fresh physical mouse activity can restart recovery after these attempts are exhausted.
+
 When remapping starts, MouseMap stops the current user's Options+ agent to prevent competing assignments. It does not uninstall Options+ automatically. **Restore Options+** is available while its launch agent remains installed.
 
 ## Importing Options+ profiles
@@ -106,6 +108,7 @@ build/MouseMap.app/Contents/MacOS/MouseMap --probe-hid
 | `--self-test` | Run profile, persistence, importer, report-parsing, gesture, readiness checks |
 | `--diagnose` | Show permissions for that process, connected devices, login registration |
 | `--probe-hid` | Discover live controls and restore native reporting before exit |
+| `--test-wake-recovery` | With the GUI quit, exercise two recovery cycles on the live mouse and inject one transient failed handshake; does not put the Mac to sleep |
 | `--import-options` | Snapshot and import the original local Options+ database |
 | `--enable-login` | Register the installed bundle for login startup |
 | `--request-permissions` | Launch the GUI with guided permission setup |

@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import IOKit.hid
 
 func runSelfTests() {
     var checks = 0
@@ -85,5 +87,67 @@ func runSelfTests() {
     check(wheel.allow(direction: -1, time: 0.67, application: "browser"), "direction reversal responds immediately")
     check(!wheel.allow(direction: -1, time: 0.7, application: "browser"), "reverse burst duplicates suppressed")
     check(wheel.allow(direction: -1, time: 0.72, application: "other-browser"), "new foreground app gets its own first action")
+    var recovery = HIDRecoveryBudget()
+    let retryDelays = (0..<5).compactMap { _ in recovery.nextDelay() }
+    check(retryDelays == [0.5, 1, 2, 4, 8], "Bluetooth wake recovery uses bounded backoff")
+    check(recovery.nextDelay() == nil, "wake recovery stops after five retries")
+    recovery.reset()
+    check(recovery.nextDelay() == 0.5, "new wake resets an exhausted recovery budget")
+    router.reset(); router.configuration.profiles[1].defaults.remove("mouse:3")
+    _ = router.button("mouse:3", down: true); let beforeReset = emitted.count
+    router.reset(); _ = router.button("mouse:3", down: true)
+    check(emitted.count == beforeReset + 1, "a pre-sleep held button cannot swallow the first post-wake press")
     printJSON(["passed": checks, "failed": 0])
+}
+
+// Live diagnostic: exercise the actual sleep/wake handlers and HID device while
+// injecting one unavailable Bluetooth write. This does not put the Mac to sleep.
+func runLiveWakeRecoveryTest() {
+    _ = NSApplication.shared
+    NSApp.setActivationPolicy(.accessory)
+    let lock = NSLock()
+    var failuresRemaining = 0
+    var failuresInjected = 0
+    let connection = Logitech(writeReport: { device, report in
+        lock.lock()
+        if failuresRemaining > 0, report.count >= 4, report[2] == 0 {
+            failuresRemaining -= 1; failuresInjected += 1; lock.unlock()
+            return kIOReturnNotResponding
+        }
+        lock.unlock()
+        return report.withUnsafeBufferPointer { IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 0x11, $0.baseAddress!, $0.count) }
+    })
+    let state = AppState(logitech: connection, writesHealthReport: false)
+    let profileData = try? Data(contentsOf: Storage.url)
+    func waitUntil(_ condition: () -> Bool, seconds: TimeInterval = 12) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        return condition()
+    }
+    func require(_ condition: Bool, _ message: String) {
+        guard condition else {
+            printJSON(["passed": false, "phase": message, "mouseStatus": connection.status, "status": state.status]); exit(1)
+        }
+    }
+    state.start()
+    require(waitUntil { state.ready }, "initial live configuration")
+    state.prepareForSleep()
+    require(!state.engine.isRunning, "sleep stops the event tap")
+    // Resume immediately, while restoration may still be in flight, matching
+    // a sleep interruption where the old connection never finished closing.
+    lock.lock(); failuresRemaining = 1; lock.unlock()
+    state.resumeAfterSleep()
+    require(waitUntil { state.ready }, "automatic wake retry and button readback")
+    lock.lock(); let injected = failuresInjected; lock.unlock()
+    require(injected == 1 && connection.reconnectCount >= 2, "one failed wake handshake retried automatically")
+    state.prepareForSleep(); state.resumeAfterSleep()
+    require(waitUntil { state.ready }, "second wake cycle")
+    require((try? Data(contentsOf: Storage.url)) == profileData, "profiles unchanged")
+    var stopped = false
+    state.shutdown { stopped = true }
+    require(waitUntil({ stopped }, seconds: 4), "shutdown after recovery")
+    printJSON(["passed": true, "wakeCycles": 2, "transientFailuresInjected": injected, "hidReconnects": connection.reconnectCount, "profilesUnchanged": true])
 }

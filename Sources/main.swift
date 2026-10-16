@@ -15,6 +15,8 @@ if CommandLine.arguments.contains("--diagnose") {
     } catch { fputs("Login registration failed: \(error.localizedDescription)\n", stderr); exit(1) }
 } else if CommandLine.arguments.contains("--self-test") {
     runSelfTests()
+} else if CommandLine.arguments.contains("--test-wake-recovery") {
+    runLiveWakeRecoveryTest()
 } else if CommandLine.arguments.contains("--probe-hid") {
     let connection = Logitech()
     var finished = false
