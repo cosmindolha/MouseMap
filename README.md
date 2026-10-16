@@ -10,7 +10,7 @@ MouseMap uses macOS event taps and Logitech HID++ through `IOHIDManager`. It nee
 
 - Assign shortcuts to the wheel click, Back, Forward, wheel-mode, and thumb buttons.
 - Set global mappings with application-specific overrides, matched by bundle identifier.
-- Record keyboard shortcuts directly in settings.
+- Record keyboard shortcuts or build them with clickable modifier and key buttons.
 - Map thumb-button click and directional gestures, plus thumb-wheel left/right movements.
 - Navigate browser tabs once per thumb-wheel burst, with a 300 ms quiet period between turns and immediate direction reversal.
 - Import compatible Options+ profiles, keyboard shortcuts, and the selected gesture preset.
@@ -50,7 +50,7 @@ This repository provides source, not a notarized distribution. Quit the running 
 1. If migrating from Options+, import its profiles before uninstalling it.
 2. Use **Enable Accessibility** and **Enable Input Monitoring**, then approve MouseMap in System Settings. Guided setup requests Accessibility first and Input Monitoring after it is enabled.
 3. Wait for **Ready**, which confirms the running GUI application's setup checks, including device configuration.
-4. Select **All applications** or add an application. Click a shortcut field, then press the combination. Escape cancels recording.
+4. Select **All applications** or add an application. Click a shortcut field to open the editor. Either use **Record keyboard shortcut** or select modifier symbols and a key, then choose **Save shortcut**. Escape stops recording; **Cancel** discards the draft.
 5. Enable **Open at login** if wanted.
 
 The mouse icon in the macOS menu bar opens settings and provides Pause/Resume and Quit. The red window-close button closes settings without stopping the input engine. MouseMap stays out of the Dock, including while settings are open. No settings window is needed for profile switching or remapping.
@@ -60,6 +60,12 @@ Pause restores native reporting for diverted buttons; quitting restores temporar
 On wake, MouseMap discards the old HID connection, clears pre-sleep button state, and rediscovers the mouse. Bluetooth handshakes retry with bounded delays of 0.5, 1, 2, 4, and 8 seconds, and configured reporting modes are read back from the mouse before it is considered ready. Fresh physical mouse activity can restart recovery after these attempts are exhausted.
 
 When remapping starts, MouseMap stops the current user's Options+ agent to prevent competing assignments. It does not uninstall Options+ automatically. **Restore Options+** is available while its launch agent remains installed.
+
+## Building a shortcut
+
+The editor offers clickable **⌃ Control**, **⌥ Option**, **⇧ Shift**, **⌘ Command**, and **fn** modifiers, plus common special keys, letters, numbers, punctuation, and F1–F20. Select several modifiers together, then one key. The preview shows both symbols and full key names. For example, previous tab can be constructed as **Control + Shift + Tab (⌃⇧⇥)**, or Safari's **Shift + Command + [**, without invoking those shortcuts while setting them up. **⇧ Shift** is a modifier; **↑ Up Arrow** is a separate key.
+
+Keyboard recording uses a focused capture field rather than a window-wide event monitor. Mouse remapping is paused while the editor is open, and neither entry method emits the shortcut during editing. Drafts are saved only with **Save shortcut** and remain tied to the selected application profile. Some system-reserved combinations can still be intercepted by macOS before applications receive them; use the buttons for those combinations.
 
 ## Importing Options+ profiles
 
@@ -92,6 +98,7 @@ The app contains no networking or telemetry client. It captures keyboard input l
 | `Logitech` | Nonexclusive HID access, discovery, temporary diversion, gesture reports |
 | `LogiImport` | Read-only SQLite import, backup, keycode conversion |
 | `StartupHealth` | Setup readiness used by the GUI and local health report |
+| `ShortcutDraft` / `ShortcutEditorView` | Shared shortcut representation for button construction and focused keyboard capture |
 
 Logitech-specific controls use HID++ feature `0x1B04`. Only configured controls are diverted. Persistent remapping flags are not changed. Protocol references: [Logitech HID++ documentation](https://github.com/Logitech/cpg-docs/tree/master/hidpp20) and [Solaar's HID++ implementation](https://github.com/pwr-Solaar/Solaar/blob/master/lib/logitech_receiver/hidpp20.py).
 

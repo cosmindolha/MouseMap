@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
     @Published var error = ""
     @Published var importSummary = ""
     @Published var recording: String?
+    @Published var shortcutEditor: ShortcutEditorTarget?
     @Published var controls: [LogitechControl] = []
     @Published var accessibility = AXIsProcessTrusted()
     @Published var monitoring = CGPreflightListenEventAccess()
@@ -21,7 +22,6 @@ final class AppState: ObservableObject {
     let router = Router()
     lazy var engine = EventEngine(router: router)
     let logitech: Logitech
-    private var monitor: Any?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var startupError = false
@@ -111,7 +111,7 @@ final class AppState: ObservableObject {
             if changed { logitech.stop {} }
             status = "Accessibility permission needed"; return
         }
-        router.suspended = recording != nil
+        router.suspended = shortcutEditor != nil
         if !input && changed { logitech.stop {} }
         guard !startupError else { status = "Profiles need attention"; return }
         if !engine.isRunning && (force || changed) {
@@ -143,7 +143,7 @@ final class AppState: ObservableObject {
     }
     func syncHID() {
         router.configuration = configuration
-        logitech.configure(configuration, app: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "", suspended: recording != nil || sleeping || quitting || !accessibility)
+        logitech.configure(configuration, app: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "", suspended: shortcutEditor != nil || sleeping || quitting || !accessibility)
     }
     func save() {
         guard !startupError else { return }
@@ -175,7 +175,7 @@ final class AppState: ObservableObject {
         let login = SMAppService.mainApp.status == .enabled
         let health = StartupHealth(accessibility: accessibility, inputMonitoring: monitoring, keyboardPosting: posting,
             eventTap: engine.isRunning, mouseReady: logitech.isReady, loginEnabled: login,
-            profilesValid: !startupError, enabled: configuration.enabled, recording: recording != nil, sleeping: sleeping)
+            profilesValid: !startupError, enabled: configuration.enabled, recording: shortcutEditor != nil, sleeping: sleeping)
         ready = health.ready
         status = health.message
         let report: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "bundlePath": Bundle.main.bundlePath,
@@ -185,6 +185,7 @@ final class AppState: ObservableObject {
             "sleeping": sleeping, "sleepCount": sleepCount, "wakeCount": wakeCount, "lastWakeAt": lastWakeAt,
             "activationPolicy": NSApp.activationPolicy() == .accessory ? "accessory" : "regular",
             "settingsVisible": NSApp.windows.contains { $0.isVisible && $0.title == "MouseMap" },
+            "shortcutEditorOpen": shortcutEditor != nil,
             "accessibility": accessibility, "inputMonitoring": monitoring, "keyboardPosting": posting,
             "eventTap": engine.isRunning, "mouseReady": logitech.isReady, "loginEnabled": login,
             "profilesValid": !startupError, "profileCount": configuration.profiles.count, "enabled": configuration.enabled,
@@ -199,22 +200,32 @@ final class AppState: ObservableObject {
             }
         } catch { self.error = "Could not save startup check: \(error.localizedDescription)" }
     }
-    func record(_ input: String) {
-        cancelRecording(); recording = input; router.suspended = true; syncHID()
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
-            if event.keyCode == 53 { self.cancelRecording(); return nil }
-            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift, .function])
-            let keys: [UInt16: String] = [36:"↩", 48:"⇥", 49:"Space", 51:"⌫", 123:"←", 124:"→", 125:"↓", 126:"↑"]
-            let prefix = [(NSEvent.ModifierFlags.control,"⌃"), (.option,"⌥"), (.shift,"⇧"), (.command,"⌘"), (.function,"fn ")].filter { flags.contains($0.0) }.map { $0.1 }.joined()
-            let label = prefix + (keys[event.keyCode] ?? event.charactersIgnoringModifiers?.uppercased() ?? "Key \(event.keyCode)")
-            self.set(input, shortcut: Shortcut(keyCode: event.keyCode, modifiers: UInt64(flags.rawValue), label: label))
-            self.cancelRecording(); return nil
-        }
+    func beginEditing(_ input: String) {
+        cancelEditing()
+        shortcutEditor = ShortcutEditorTarget(input: input, profileID: selected, profileName: profile.name,
+            shortcut: configuration.shortcut(input, app: selected))
+        router.suspended = true; syncHID()
+    }
+    func setListening(_ listening: Bool, target: UUID) {
+        guard let editor = shortcutEditor, editor.id == target else { return }
+        recording = listening ? editor.input : nil
+    }
+    func commitEditing(_ shortcut: Shortcut, target: ShortcutEditorTarget) {
+        guard shortcutEditor?.id == target.id,
+              let index = configuration.profiles.firstIndex(where: { $0.id == target.profileID }) else { return }
+        var updated = configuration
+        updated.profiles[index].bindings[target.input] = shortcut
+        updated.profiles[index].defaults.remove(target.input)
+        do {
+            try Storage.save(updated); configuration = updated; cancelEditing()
+        } catch { self.error = "Could not save shortcut: \(error.localizedDescription)" }
+    }
+    func cancelEditing() {
+        recording = nil; shortcutEditor = nil
+        router.suspended = sleeping || quitting || !accessibility; syncHID()
     }
     func cancelRecording() {
-        if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
-        recording = nil; router.suspended = false; syncHID()
+        cancelEditing()
     }
     func shutdown(completion: @escaping () -> Void) {
         quitting = true; timer?.invalidate(); timer = nil
@@ -314,23 +325,28 @@ struct SettingsView: View {
                         if !state.monitoring { Button("Enable Input Monitoring") { state.permissions(true) } }
                     }.padding(.vertical, 6)
                 }
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(state.inputs, id: \.self) { input in
-                            HStack(spacing: 10) {
-                                Text(Inputs.name(input)).frame(maxWidth: .infinity, alignment: .leading)
-                                Button {
-                                    if state.recording == input { state.cancelRecording() } else { state.record(input) }
-                                } label: {
-                                    Text(state.recording == input ? "Press shortcut… Esc cancels" : (state.configuration.shortcut(input, app: state.selected)?.label ?? "Native behavior"))
-                                        .frame(minWidth: 155).padding(.vertical, 3)
-                                }.disabled(state.recording != nil && state.recording != input)
-                                Menu {
-                                    Button("Native behavior") { state.native(input) }
-                                    if state.selected != "*" { Button("Use global setting") { state.set(input, shortcut: nil) } }
-                                } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 20)
-                            }.padding(.vertical, 10)
-                            Divider()
+                if let target = state.shortcutEditor {
+                    ShortcutEditorView(state: state, target: target).id(target.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(state.inputs, id: \.self) { input in
+                                HStack(spacing: 10) {
+                                    Text(Inputs.name(input)).frame(maxWidth: .infinity, alignment: .leading)
+                                    Button {
+                                        state.beginEditing(input)
+                                    } label: {
+                                        Text(state.configuration.shortcut(input, app: state.selected)?.label ?? "Native behavior")
+                                            .frame(minWidth: 155).padding(.vertical, 3)
+                                    }
+                                    Menu {
+                                        Button("Native behavior") { state.native(input) }
+                                        if state.selected != "*" { Button("Use global setting") { state.set(input, shortcut: nil) } }
+                                    } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 20)
+                                }.padding(.vertical, 10)
+                                Divider()
+                            }
                         }
                     }
                 }

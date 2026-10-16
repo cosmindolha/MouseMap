@@ -200,7 +200,7 @@ struct StartupHealth {
         if !inputMonitoring { return "Input Monitoring permission needed" }
         if !keyboardPosting { return "Keyboard control permission needed" }
         if !eventTap { return "Input capture is not running" }
-        if recording { return "Recording shortcut · remapping paused" }
+        if recording { return "Editing shortcut · remapping paused" }
         if !mouseReady { return "Waiting for mouse setup" }
         if !loginEnabled { return "Ready · login startup is off" }
         return "Ready · permissions, mouse and login startup checked"

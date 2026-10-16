@@ -97,6 +97,23 @@ func runSelfTests() {
     _ = router.button("mouse:3", down: true); let beforeReset = emitted.count
     router.reset(); _ = router.button("mouse:3", down: true)
     check(emitted.count == beforeReset + 1, "a pre-sleep held button cannot swallow the first post-wake press")
+    var draft = ShortcutDraft()
+    check(draft.shortcut == nil, "modifier-only combinations cannot be saved")
+    draft.toggle(1 << 18); draft.toggle(1 << 17)
+    draft.select(ShortcutKeys.key(48)!)
+    check(draft.shortcut == Shortcut(keyCode: 48, modifiers: (1 << 18) | (1 << 17), label: "⌃⇧⇥"), "button builder creates previous-tab Control Shift Tab")
+    draft.toggle(1 << 18); draft.toggle(1 << 20); draft.select(ShortcutKeys.key(33)!)
+    check(draft.shortcut == Shortcut(keyCode: 33, modifiers: (1 << 20) | (1 << 17), label: "⇧⌘["), "button builder creates Safari Command Shift bracket")
+    var captured = ShortcutDraft()
+    captured.capture(code: 48, modifiers: (1 << 18) | (1 << 17) | (1 << 21), characters: "\t")
+    check(captured.shortcut?.label == "⌃⇧⇥", "recorded special keys use symbols and ignore unrelated event flags")
+    check(captured.shortcut?.modifiers == (1 << 18) | (1 << 17), "recorded and built modifiers produce the same event flags")
+    captured.select(ShortcutKeys.key(13)!)
+    check(captured.shortcut?.label == "⌃⇧W", "changing a recorded key clears its old label")
+    let systemAction = Shortcut(keyCode: 0, modifiers: 0, label: "Mission Control", action: "mission-control")
+    check(ShortcutDraft(shortcut: systemAction).shortcut == nil, "system actions do not silently turn into the A key")
+    check(Set(ShortcutKeys.all.map { $0.code }).count == ShortcutKeys.all.count, "key picker contains unique virtual keycodes")
+    check(ShortcutKeys.function.count == 20 && ShortcutKeys.symbols.contains { $0.code == 30 }, "picker includes F1 through F20 and bracket keys")
     printJSON(["passed": checks, "failed": 0])
 }
 
